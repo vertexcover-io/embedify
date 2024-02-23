@@ -1,38 +1,42 @@
 from functools import cached_property
 import time
-from typing import Literal, Protocol
+from typing import Any, Generator, Literal, Protocol, cast
 import copy
 import uuid
 from pydantic import BaseModel, model_validator
 import weaviate
 
 from embedify.embeddings.openai import OpenAIEmbeddingConfig, OpenAIEmbeddingModel
-from embedify.types import SupportedVectorDb
+from embedify.types import DEFAULT_LIMIT, SupportedVectorDb
 
-EmbeddingModel = Literal["OpenAI", "Cohere", "HuggingFace"]
-DEFAULT_BATCH_SIZE = 200
+EmbeddingModelType = Literal["OpenAI", "Cohere", "HuggingFace"]
 
 
 class EmbeddingModelConfig(Protocol):
-    model_name: EmbeddingModel
+    model_type: EmbeddingModelType
+    model_name: str
     module_name: str
     api_key: str
     rate_limit: float  # per second
 
-    def model_config(self) -> dict[str, str]:
-        pass
+    def module_config(self) -> dict[str, Any]:
+        ...
 
 
 class WeaviateOpenAIConfig(OpenAIEmbeddingConfig):
     @property
-    def model_name(self) -> EmbeddingModel:
+    def model_type(self) -> EmbeddingModelType:
         return "OpenAI"
+
+    @property
+    def model_name(self) -> str:
+        return self.model.value
 
     @property
     def module_name(self) -> str:
         return f"text2vec-{self.model_name.lower()}"
 
-    def module_config(self) -> dict[str, str]:
+    def module_config(self) -> dict[str, Any]:
         return {
             "model": "ada"
             if self.model == OpenAIEmbeddingModel.ADA
@@ -50,19 +54,21 @@ class WeaviateConfig(BaseModel):
     password: str | None = None
     batch_size: int = 200
     use_native: bool = True
-    embedding_model: WeaviateOpenAIConfig
+    embedding_model: EmbeddingModelConfig
 
-    @model_validator(mode="after")
-    def validate_model(self):
+    @model_validator(mode="after")  # type: ignore
+    def validate_model(self) -> "WeaviateConfig":
         if self.username and not self.password:
             raise ValueError("Password is required when username is provided")
         elif self.api_key and self.username:
             raise ValueError("Only one of api_key or username/password is allowed")
 
-    def auth_config(self) -> weaviate.auth.AuthCredentials:
+        return self
+
+    def auth_config(self) -> weaviate.auth.AuthCredentials | None:
         if self.api_key:
             return weaviate.auth.AuthApiKey(api_key=self.api_key)
-        elif self.username:
+        elif self.username and self.password:
             return weaviate.auth.AuthClientPassword(
                 username=self.username, password=self.password
             )
@@ -70,7 +76,7 @@ class WeaviateConfig(BaseModel):
             return None
 
     @property
-    def name(self):
+    def name(self) -> str:
         return SupportedVectorDb.Weaviate.name
 
 
@@ -85,7 +91,7 @@ class WeaviateMigrateClientWithNativeEmbedding:
         self.rate_limit = embedding_model.rate_limit
 
         additional_headers = {}
-        api_key_header = f"X-{embedding_model.model_name}-API-Key"
+        api_key_header = f"X-{embedding_model.model_type}-API-Key"
         additional_headers = {api_key_header: embedding_model.api_key}
 
         self._client = weaviate.Client(
@@ -99,28 +105,28 @@ class WeaviateMigrateClientWithNativeEmbedding:
         return self._config.embedding_model
 
     @cached_property
-    def current_schema(self):
-        return self._client.schema.get(self._config.collection)
+    def current_schema(self) -> dict[str, Any]:
+        return self._client.schema.get(self._config.collection)  # type: ignore
 
     def new_collection_name(self) -> str:
         if self._config.new_collection:
             return self._config.new_collection
 
-        return f"{self._config.collection}-{self.embedding_model.model_name.lower()}-{self.embedding_model.model.value}".replace(
+        return f"{self._config.collection}-{self.embedding_model.model_type.lower()}-{self.embedding_model.model_name}".replace(
             "-", "_"
         )
 
     def migrate_schema(self):
         current_schema = self.current_schema
         new_module_config = self.embedding_model.module_config()
-        new_schema = copy.deepcopy(current_schema)
+        new_schema: dict[str, Any] = copy.deepcopy(current_schema)
         new_class_name = self.new_collection_name()
         new_schema["class"] = new_class_name
         new_schema["moduleConfig"] = {
             self.embedding_model.module_name: new_module_config
         }
         try:
-            self._client.schema.create_class(new_schema)
+            self._client.schema.create(new_schema)  # type: ignore
         except weaviate.exceptions.UnexpectedStatusCodeException as e:
             if e.status_code == 422:
                 print(f"Schema already exists for {new_class_name}. Reusing")
@@ -128,12 +134,12 @@ class WeaviateMigrateClientWithNativeEmbedding:
             else:
                 raise
 
-    def migrate(self, batch_size=None, limit=None):
+    def migrate(self, limit: int = DEFAULT_LIMIT, batch_size: int | None = None):
         self.migrate_schema()
         total_count = 0
         batch_size = min(batch_size or self._config.batch_size, limit)
         obj_inserter = self.object_inserter(batch_size=batch_size)
-        obj_inserter.send(None)
+        next(obj_inserter)
         for batch in self.load_objects(batch_size=batch_size):
             end = min(total_count + len(batch), limit)
             objects = batch[: end - total_count]
@@ -146,23 +152,31 @@ class WeaviateMigrateClientWithNativeEmbedding:
         except GeneratorExit:
             pass
 
-    def object_inserter(self, batch_size=None):
+    def object_inserter(
+        self, batch_size: int | None = None
+    ) -> Generator[None, list[dict[str, Any]], None]:
+        up_batch_size: int = batch_size or self._config.batch_size
+
         def handle_rate_limit(_):
-            time_took_to_create_batch = batch_size * (
-                self._client.batch.creation_time
-                / self._client.batch.recommended_num_objects
+            time_took_to_create_batch: float = cast(
+                float,
+                up_batch_size
+                * (  # type: ignore
+                    self._client.batch.creation_time
+                    / self._client.batch.recommended_num_objects
+                ),
             )
             time.sleep(
                 max(
-                    batch_size / self.rate_limit - time_took_to_create_batch + 1,
+                    up_batch_size / self.rate_limit - time_took_to_create_batch + 1,
                     0,
                 )
             )
 
         new_collection = self.new_collection_name()
-        batch_size = batch_size or self._config.batch_size
-        self._client.batch.configure(
-            batch_size=batch_size,
+
+        self._client.batch.configure(  # type: ignore
+            batch_size=up_batch_size,
             dynamic=True,
             callback=handle_rate_limit,
         )
@@ -174,14 +188,16 @@ class WeaviateMigrateClientWithNativeEmbedding:
                     uuid = new_obj["_additional"]["id"]
                     del new_obj["_additional"]
 
-                    batch.add_data_object(
+                    batch.add_data_object(  # type: ignore
                         class_name=new_collection, data_object=new_obj, uuid=uuid
                     )
 
-    def load_objects(self, batch_size=None) -> list[dict[str, any]]:
+    def load_objects(
+        self, batch_size: int | None = None
+    ) -> Generator[list[dict[str, Any]], None, None]:
         properties = [p["name"] for p in self.current_schema["properties"]]
         query = (
-            self._client.query.get(
+            self._client.query.get(  # type: ignore
                 class_name=self._config.collection,
                 properties=properties,
             )
@@ -191,11 +207,13 @@ class WeaviateMigrateClientWithNativeEmbedding:
         cursor: uuid.UUID | None = None
         while True:
             if cursor:
-                result = query.with_after(cursor).do()
+                result = query.with_after(cursor).do()  # type: ignore
             else:
-                result = query.do()
+                result = query.do()  # type: ignore
 
-            objects = result["data"]["Get"][self._config.collection]
+            objects = cast(
+                list[dict[str, Any]], result["data"]["Get"][self._config.collection]
+            )
             if not objects:
                 break
             cursor = objects[-1]["_additional"]["id"]

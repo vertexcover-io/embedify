@@ -1,11 +1,12 @@
 from enum import Enum
-import functools
-from typing import Any, Optional
+from typing import Any, TypeVar
 
+from openai import AsyncOpenAI, BaseModel, OpenAI
+from openai._constants import DEFAULT_MAX_RETRIES
 from openai.types import CreateEmbeddingResponse, Embedding
+from pydantic import model_validator
 
 from embedify.embeddings.base import BaseEmbedding
-from openai import DEFAULT_MAX_RETRIES, BaseModel, OpenAI
 
 
 class OpenAIEmbeddingModel(Enum):
@@ -17,16 +18,26 @@ class OpenAIEmbeddingModel(Enum):
 class OpenAIEmbeddingConfig(BaseModel):
     api_key: str
     model: OpenAIEmbeddingModel
-    dimension: Optional[int]
+    dimension: int
     rate_limt: float = 50
-
     organization: str | None = None
     base_url: str | None = None
     timeout: float | None = None
     max_retries: int = DEFAULT_MAX_RETRIES
 
+    @model_validator(mode="before")
+    def fix_dimension(cls, values: dict[str, Any]) -> dict[str, Any]:
+        if "dimension" not in values:
+            if values["model"] == OpenAIEmbeddingModel.ADA:
+                values["dimension"] = 1536
+            elif values["model"] == OpenAIEmbeddingModel.LARGE:
+                values["dimension"] = 3072
+            else:
+                values["dimension"] = 1024
+        return values
+
     def optional_kwargs(self) -> dict[str, Any]:
-        kwargs = {}
+        kwargs: dict[str, Any] = {}
         if self.organization:
             kwargs["organization"] = self.organization
         if self.base_url:
@@ -38,72 +49,49 @@ class OpenAIEmbeddingConfig(BaseModel):
         return kwargs
 
 
-def native_support_guard(func):
-    @functools.wraps(func)
-    def wrapper(self: "OpenAIEmbedding", *args, **kwargs):
-        if self.config.use_native:
-            raise NotImplementedError(
-                "Vector Db Native support enabled. Use that instead"
-            )
-        return func(self, *args, **kwargs)
-
-    return wrapper
+ReturnType = TypeVar("ReturnType")
 
 
 class OpenAIEmbedding(BaseEmbedding):
     config: OpenAIEmbeddingConfig
     client: OpenAI
+    async_client: AsyncOpenAI
 
     def __init__(self, config: OpenAIEmbeddingConfig):
         self.config = config
-        self.client = OpenAI(config.api_key, **config.optional_kwargs())
+        self.client = OpenAI(api_key=config.api_key, **config.optional_kwargs())
+        self.async_client = AsyncOpenAI(
+            api_key=config.api_key, **config.optional_kwargs()
+        )
 
     def _embed(self, input: str | list[str]) -> list[Embedding]:
         resp: CreateEmbeddingResponse = self.client.embeddings.create(
             input=input,
             model=self.config.model.value,
-            dimension=self.config.dimension,
+            dimensions=self.config.dimension,
         )
         return resp.data
 
-    @native_support_guard
     def embed(self, text: str) -> list[float]:
-        if self.config.use_native:
-            raise NotImplementedError(
-                "Vector Db Native support enabled. Use that instead"
-            )
-
         resp = self._embed(text)
         return resp[0].embedding
 
-    @native_support_guard
     def bulk_embed(self, text_list: list[str]) -> list[list[float]]:
         resp = self._embed(text_list)
         return [embedding.embedding for embedding in resp]
 
     async def _async_embed(self, input: str | list[str]) -> list[Embedding]:
-        resp: CreateEmbeddingResponse = await self.client.embeddings.create(
+        resp: CreateEmbeddingResponse = await self.async_client.embeddings.create(
             input=input,
             model=self.config.model.value,
-            dimension=self.config.dimension,
+            dimensions=self.config.dimension,
         )
         return resp.data
 
-    @native_support_guard
-    async def async_embed(self, text: str) -> list[str]:
+    async def async_embed(self, text: str) -> list[float]:
         resp = await self._async_embed(text)
         return resp[0].embedding
 
-    @native_support_guard
     async def async_bulk_embed(self, text_list: list[str]) -> list[list[float]]:
         resp = await self._async_embed(text_list)
         return [embedding.embedding for embedding in resp]
-
-    def dimensions(self) -> int:
-        if self.config.dimension:
-            return self.config.dimension
-        elif self.config.model == OpenAIEmbeddingModel.ADA:
-            return 1536
-        elif self.config.model == OpenAIEmbeddingModel.LARGE:
-            return 3072
-        return 1024

@@ -1,18 +1,24 @@
 from abc import ABC
+import abc
 
 
 class BaseEmbedding(ABC):
-    def embed(self, _: str) -> list[float]:
+    @abc.abstractmethod
+    def embed(self, text: str) -> list[float]:
         pass
 
-    def bulk_embed(self, _: list[str]) -> list[list[float]]:
+    @abc.abstractmethod
+    def bulk_embed(self, text_list: list[str]) -> list[list[float]]:
         pass
 
-    async def async_embed(self, _: str) -> list[str]:
+    @abc.abstractmethod
+    async def async_embed(self, text: str) -> list[float]:
         pass
 
-    async def async_bulk_embed(self, _: list[str]) -> list[list[float]]:
+    @abc.abstractmethod
+    async def async_bulk_embed(self, text_list: list[str]) -> list[list[float]]:
         pass
 
+    @abc.abstractmethod
     def dimensions(self) -> int:
         pass

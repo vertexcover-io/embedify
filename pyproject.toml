@@ -29,6 +29,7 @@ dev-dependencies = [
     "ruff>=0.1.15",
     "pre-commit>=3.5.0",
     "ipython>=8.12.3",
+    "pyright>=1.1.351",
 ]
 
 [tool.hatch.metadata]
@@ -36,3 +37,21 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/embedify"]
+
+
+# [tool.mypy]
+# mypy_path = "stubs"
+# disallow_untyped_defs = true
+# disallow_any_unimported = true
+# check_untyped_defs = true
+# warn_return_any = true
+# show_error_codes = true
+# warn_unused_ignores = true
+# files = ["src"]
+
+[tool.pyright]
+stubPath = "stubs"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+venvPath = "."
+venv = ".venv"

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 from pathlib import Path
-from typing import Annotated, Optional
-import typer
+from typing import Annotated
+
 import tomllib
+import typer
+
 from embedify.config import get_migration_client, load_config
 from embedify.types import InstalledVectorDb
 
@@ -10,19 +12,22 @@ app = typer.Typer()
 
 
 @app.command()
-def embed():
+def embed() -> None:
     pass
 
 
 @app.command()
-def installed_vector_dbs():
+def installed_vector_dbs() -> None:
     typer.echo("Installed Vector Databases:")
     for db in InstalledVectorDb:
         typer.echo(f" {db.value}")
 
 
 @app.command()
-def migrate(config_file: Annotated[Path, typer.Argument], limit: Optional[int] = 10):
+def migrate(
+    config_file: Annotated[Path, typer.Argument],
+    limit: Annotated[int, typer.Option] = 10,
+) -> None:
     if not config_file.is_file():
         raise ValueError(f"Config file not found: {config_file}")
     with open(config_file, "rb") as f:

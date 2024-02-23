@@ -1,6 +1,8 @@
 import enum
 import importlib
-from typing import Protocol
+from typing import Protocol, Type
+
+DEFAULT_LIMIT = 2**64 - 1
 
 
 class SupportedVectorDb(enum.Enum):
@@ -16,7 +18,7 @@ __vector_db_pkg_map__ = {
 }
 
 
-def get_installed_vector_dbs():
+def get_installed_vector_dbs() -> Type[enum.Enum]:
     installed_vector_dbs = {}
     for key, pkg in __vector_db_pkg_map__.items():
         try:
@@ -32,5 +34,9 @@ InstalledVectorDb = get_installed_vector_dbs()
 
 
 class VectorDbMigrateClient(Protocol):
-    def migrate(self, batch_size=None, limit=None):
-        pass
+    def migrate(
+        self,
+        limit: int = DEFAULT_LIMIT,
+        batch_size: int | None = None,
+    ) -> None:
+        ...
