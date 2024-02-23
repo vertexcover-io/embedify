@@ -1,40 +1,43 @@
+import abc
 from functools import cached_property
 import time
-from typing import Any, Generator, Literal, Protocol, cast
+from typing import Any, Generator, Literal, cast
 import copy
 import uuid
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 import weaviate
 
 from embedify.embeddings.openai import OpenAIEmbeddingConfig, OpenAIEmbeddingModel
 from embedify.types import DEFAULT_LIMIT, SupportedVectorDb
 
-EmbeddingModelType = Literal["OpenAI", "Cohere", "HuggingFace"]
+EmbeddingModelType = Literal["OpenAI"] | Literal["Cohere"]
 
 
-class EmbeddingModelConfig(Protocol):
-    model_type: EmbeddingModelType
-    model_name: str
-    module_name: str
+class EmbeddingModelConfig(BaseModel, abc.ABC):
     api_key: str
     rate_limit: float  # per second
 
+    @property
+    @abc.abstractmethod
+    def model_name(self) -> str:
+        ...
+
+    @abc.abstractmethod
     def module_config(self) -> dict[str, Any]:
         ...
 
-
-class WeaviateOpenAIConfig(OpenAIEmbeddingConfig):
     @property
-    def model_type(self) -> EmbeddingModelType:
-        return "OpenAI"
+    @abc.abstractmethod
+    def module_name(self) -> str:
+        ...
+
+
+class WeaviateOpenAIConfig(OpenAIEmbeddingConfig, EmbeddingModelConfig):
+    platform: Literal["OpenAI"]
 
     @property
     def model_name(self) -> str:
         return self.model.value
-
-    @property
-    def module_name(self) -> str:
-        return f"text2vec-{self.model_name.lower()}"
 
     def module_config(self) -> dict[str, Any]:
         return {
@@ -42,6 +45,28 @@ class WeaviateOpenAIConfig(OpenAIEmbeddingConfig):
             if self.model == OpenAIEmbeddingModel.ADA
             else self.model.value,
             "dimension": self.dimension,
+        }
+
+    @property
+    def module_name(self) -> str:
+        return f"text2vec-{self.platform.lower()}"
+
+
+class WeaviateCohereConfig(EmbeddingModelConfig):
+    platform: Literal["Cohere"]
+
+    @property
+    def module_name(self) -> str:
+        return f"text2vec-{self.platform.lower()}"
+
+    @property
+    def model_name(self) -> str:
+        return ""
+
+    def module_config(self) -> dict[str, Any]:
+        return {
+            "model": self.model_name,
+            "dimension": 1024,
         }
 
 
@@ -54,7 +79,9 @@ class WeaviateConfig(BaseModel):
     password: str | None = None
     batch_size: int = 200
     use_native: bool = True
-    embedding_model: EmbeddingModelConfig
+    embedding_model: WeaviateOpenAIConfig | WeaviateCohereConfig = Field(
+        ..., discriminator="platform"
+    )
 
     @model_validator(mode="after")  # type: ignore
     def validate_model(self) -> "WeaviateConfig":
@@ -91,7 +118,7 @@ class WeaviateMigrateClientWithNativeEmbedding:
         self.rate_limit = embedding_model.rate_limit
 
         additional_headers = {}
-        api_key_header = f"X-{embedding_model.model_type}-API-Key"
+        api_key_header = f"X-{embedding_model.platform}-API-Key"
         additional_headers = {api_key_header: embedding_model.api_key}
 
         self._client = weaviate.Client(
@@ -112,7 +139,7 @@ class WeaviateMigrateClientWithNativeEmbedding:
         if self._config.new_collection:
             return self._config.new_collection
 
-        return f"{self._config.collection}-{self.embedding_model.model_type.lower()}-{self.embedding_model.model_name}".replace(
+        return f"{self._config.collection}-{self.embedding_model.platform.lower()}-{self.embedding_model.model_name}".replace(
             "-", "_"
         )
 
@@ -126,7 +153,7 @@ class WeaviateMigrateClientWithNativeEmbedding:
             self.embedding_model.module_name: new_module_config
         }
         try:
-            self._client.schema.create(new_schema)  # type: ignore
+            self._client.schema.create({"classes": [new_schema]})  # type: ignore
         except weaviate.exceptions.UnexpectedStatusCodeException as e:
             if e.status_code == 422:
                 print(f"Schema already exists for {new_class_name}. Reusing")
